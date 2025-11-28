@@ -1,165 +1,168 @@
+# Spectrum Multi-Asset Quote Contract
+
+A logic contract implementation that prices collateral boxes containing ERG plus multiple tokens using Spectrum DEX pools as price oracles.
+
+---
+
+## Required Interface Checklist
+
+| Requirement | Implemented | How |
+|-------------|-------------|-----|
+| R4[0] borrowLimit | ✓ | Preserved from input (`iBorrowLimit == fBorrowLimit`) |
+| R4[1] quotePrice | ✓ | Calculated from DEX reserves |
+| R4[2] threshold | ✓ | Calculated as weighted aggregate |
+| R4[3] penalty | ✓ | Static value (hardcoded 30) |
+| R4[4] minimumValue | ✓ | Preserved from input |
+| R4[5] bufferGap | ✓ | Preserved from input |
+| R4[6] minimumLoanAmount | ✓ | Preserved from input |
+| R4[7] shortLoanFee | ✓ | Preserved from input |
+| R4[8] shortLoanDuration | ✓ | Preserved from input |
+| R9[0] boxIndex | ✓ | Used to select `boxToQuote` from INPUTS or OUTPUTS |
+| Logic NFT in tokens(0) | ✓ | Successor found via `b.tokens(0) == SELF.tokens(0)` |
+
+---
+
+## Overview
+
+This contract prices collateral boxes that may contain **ERG plus multiple tokens**. It uses Spectrum DEX pools as price oracles, converting everything to a final quote in the pool's native currency.
+
+---
+
+## Additional Registers
+
+| Register | Type | Purpose |
+|----------|------|---------|
+| R5 | `Coll[Coll[Byte]]` | DEX pool NFT IDs. Index 0 = primary (ERG/PoolCurrency), Index 1+ = secondary (Token/ERG) |
+| R6 | `Coll[Long]` | Per-asset thresholds. Index 0 = ERG threshold, Index 1+ = token thresholds |
+| R7 | `Coll[Long]` | Token amounts from quoted box (ordered to match R5/R6). `0` for assets not present |
+| R8 | `Coll[Coll[Byte]]` | Token IDs corresponding to R7 amounts |
+| R9 | `Coll[Int]` | `[boxIndex, dexStartIndex]` - extends required R9 with DEX data input location |
+
+---
+
+## Price Calculation Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Quoted Box                                                 │
+│  ├── .value (ERG)                                          │
+│  └── .tokens(1+) (collateral tokens)                       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 1: Convert each token → ERG via secondary DEX pools  │
+│                                                             │
+│  For each token with amount > 0:                           │
+│    collateralMarketValue = (dexErg * amount * fee) /       │
+│      ((dexTokenReserve * 1.02) * 1000 + (amount * fee))    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 2: Sum total ERG value                               │
+│                                                             │
+│  totalBoxValue = boxERG + convertedTokenERG - networkFee   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Step 3: Convert total ERG → Pool Currency via primary DEX │
+│                                                             │
+│  quotePrice = (poolCurrencyReserve * totalERG * fee) /     │
+│    ((ergReserve * 1.02) * 1000 + (totalERG * fee))         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Slippage Buffer**: All DEX calculations include a 2% buffer (`Slippage = 2`) to account for price movement between quote creation and transaction confirmation.
+
+---
+
+## Aggregate Threshold Calculation
+
+Each asset type has its own threshold (e.g., ERG might be 800, a volatile token might be 600). The aggregate is weighted by value proportion:
+
+```
+aggregateThreshold = Σ (assetValue / totalValue) * assetThreshold
+```
+
+Expanded:
 ```scala
-{{	
-	val Slippage = 2.toBigInt
-	val SlippageDenom = 100.toBigInt
-	val DexFeeDenom = 1000.toBigInt
-	val MaximumNetworkFee = 5000000
-	val LargeMultiplier = 1000000000000L
-	val outLogic = OUTPUTS.filter {{
-		(b : Box) => b.tokens.size > 0 && b.tokens(0) == SELF.tokens(0)
-	}}(0)
+val aggregateThresholdPrimarySum = (boxERG * primaryThreshold) / totalValue
 
-	val iReport = SELF.R4[Coll[Long]].get
-	val iBorrowLimit = iReport(0)
-	val iMinimumValue = iReport(4)
-	val iBufferGap = iReport(5)
-	val iMinimumLoanAmount = iReport(6)
-    val iShortLoanFee = iReport(7)
-    val iShortLoanDuration = iReport(8)
-	
-	val iDexNfts = SELF.R5[Coll[Coll[Byte]]].get
-	val iAssetThresholds = SELF.R6[Coll[Long]].get
-	
-	val fReport = outLogic.R4[Coll[Long]].get
-	val fBorrowLimit = fReport(0)
-	val fQuotePrice = fReport(1)
-	val fAggregateThreshold = fReport(2)
-	val fAggregatePenalty = fReport(3) 
-	val fMinimumValue = fReport(4)
-	val fBufferGap = fReport(5)
-	val fMinimumLoanAmount = fReport(6)
-    val fShortLoanFee = fReport(7)
-    val fShortLoanDuration = fReport(8)
-    
-	val fDexNfts = outLogic.R5[Coll[Coll[Byte]]].get
-	val primaryDexNft = fDexNfts(0)
-	val secondaryDexNfts = fDexNfts.slice(1, fDexNfts.size)
-	val fAssetThresholds = outLogic.R6[Coll[Long]].get
-	val primaryThreshold = fAssetThresholds(0)
-	val secondaryThresholds = fAssetThresholds.slice(1, fAssetThresholds.size)
-	val fOrderedAssetAmounts = outLogic.R7[Coll[Long]].get
-	val fOrderedQuotedAssetIds = outLogic.R8[Coll[Coll[Byte]]].get
-	val fHelperIndices = outLogic.R9[Coll[Int]].get
-	val fBoxIndex = fHelperIndices(0)
-	val fDexStartIndex = fHelperIndices(1)
+val aggregateThresholdSecondarySum = Σ (tokenERGValue * tokenThreshold) / totalValue
 
-	val scriptRetained = outLogic.propositionBytes == SELF.propositionBytes
-	val quoteSettingsRetained = fDexNfts == iDexNfts && fAssetThresholds == iAssetThresholds
+val aggregateThreshold = aggregateThresholdPrimarySum + aggregateThresholdSecondarySum
+```
 
-	// 1 -> 0, 2 -> 1, 3 -> 2, 4 -> 3 For OUTPUTS
-	// -1 -> 0, -2 -> 1, -3 -> 2, -4 -> 3 For INPUTS
-	val boxToQuote = if (fBoxIndex > 0) {{
-		OUTPUTS(fBoxIndex - 1)
-	}} else {{
-		INPUTS(fBoxIndex * -1 - 1)
-	}}	
+This means a box with mostly ERG gets a threshold close to the ERG threshold, while a box heavy in volatile tokens gets a lower (more conservative) aggregate threshold.
 
-	val primaryDexBox = CONTEXT.dataInputs(fDexStartIndex)
-	val dexDIns = CONTEXT.dataInputs.slice(fDexStartIndex + 1, CONTEXT.dataInputs.size) // Primary DEX Box at fDexStartIndex
-	val dInsMatchesAssetsSize = dexDIns.size == fOrderedAssetAmounts.size && dexDIns.size == secondaryDexNfts.size
-	val collateralValueInErgs = dexDIns.zip(fOrderedAssetAmounts).fold(0L.toBigInt, {{(z:BigInt, p: (Box, Long)) => (
-	{{
-		if (p._2 > 0) {{
-			val dexBox = p._1
-			val dexReservesErg = dexBox.value
-			val dexReservesToken = dexBox.tokens(2)
-			val dexFee = dexBox.R4[Int].get
-			val inputAmount = p._2
-			val collateralMarketValue = (dexReservesErg.toBigInt * inputAmount.toBigInt * dexFee.toBigInt) /
-			  ((dexReservesToken._2.toBigInt + (dexReservesToken._2.toBigInt * Slippage.toBigInt / 100.toBigInt)) * DexFeeDenom.toBigInt +
-			  (inputAmount.toBigInt * dexFee.toBigInt))
-	
-			z + collateralMarketValue
-		}} else {{
-			z
-		}}
-	}}
-	)}})
+---
 
-	val totalBoxValue = boxToQuote.value.toBigInt + collateralValueInErgs.toBigInt - MaximumNetworkFee.toBigInt 
+## Data Input Requirements
 
-	val aggregateThresholdPrimarySum = (boxToQuote.value.toBigInt * LargeMultiplier * primaryThreshold) / totalBoxValue
-	val aggregateThresholdSecondarySum = fOrderedAssetAmounts.indices.fold(0L.toBigInt, {{(z:BigInt, index: Int) => (
-	{{
-		val inputAmount = fOrderedAssetAmounts(index)
-		if (inputAmount > 0) {{
-			val dexBox = dexDIns(index)
-			val dexReservesErg = dexBox.value
-			val dexReservesToken = dexBox.tokens(2)
-			val dexFee = dexBox.R4[Int].get
-			
-			val collateralMarketValue = (dexReservesErg.toBigInt * inputAmount.toBigInt * dexFee.toBigInt) /
-				((dexReservesToken._2.toBigInt + (dexReservesToken._2.toBigInt * Slippage.toBigInt / 100.toBigInt)) * DexFeeDenom.toBigInt +
-				(inputAmount.toBigInt * dexFee.toBigInt))
-			val threshold = secondaryThresholds(index)
-	
-			z + (collateralMarketValue * LargeMultiplier * threshold) / totalBoxValue
-		}} else {{
-			z
-		}}
-	}}
-	)}})
-	val aggregateThreshold = aggregateThresholdPrimarySum + aggregateThresholdSecondarySum
-	val zippedOrderedAssetsList = fOrderedQuotedAssetIds.zip(fOrderedAssetAmounts)
-	val matchingOrderedListSize = fOrderedAssetAmounts.size == fOrderedQuotedAssetIds.size
-	val allAssetsCounted = boxToQuote.tokens.slice(1,boxToQuote.tokens.size).forall{{
-		(token: (Coll[Byte], Long)) => zippedOrderedAssetsList.exists {{
-			(reportedToken: (Coll[Byte], Long)) => reportedToken == token
-		}}
-	}}
+| Index | Box | Validation |
+|-------|-----|------------|
+| `dexStartIndex` | Primary DEX (ERG/PoolCurrency) | `tokens(0)._1 == primaryDexNft` |
+| `dexStartIndex + 1` | Secondary DEX for token 0 | `tokens(0)._1 == secondaryDexNfts(0)` AND `tokens(2)._1 == fOrderedQuotedAssetIds(0)` |
+| `dexStartIndex + 2` | Secondary DEX for token 1 | ... |
+| ... | ... | ... |
 
-	val missingAssetsSize = fOrderedAssetAmounts.size - (boxToQuote.tokens.size - 1) // Ignores the borrow tokens
-	val correctNumberOfZeroes = fOrderedAssetAmounts.filter{{
-		(Amount: Long) => {{
-		Amount == 0L
-		}}
-	}}.size == missingAssetsSize
+---
 
-	// Also validates the dexNFTs match the settings
-	val assetsOrderedCorrectly = secondaryDexNfts.indices.forall{{
-		(index: Int) =>
-		val dexBox = dexDIns(index)
-		val dexNFT = secondaryDexNfts(index)
-		val dexTokenId = dexBox.tokens(2)._1
-		val reportedAssetId = fOrderedQuotedAssetIds(index)
-		(
-			dexNFT == dexBox.tokens(0)._1 &&
-			reportedAssetId == dexTokenId
-		)
-	}}
+## Asset Accounting Validation
 
-	val validAggregateThreshold = aggregateThreshold / LargeMultiplier == fAggregateThreshold 
-	val validPenalty = fAggregatePenalty == 30L // Static Penalty as an example
+The contract ensures every collateral token is properly counted:
 
-	val xAssets = primaryDexBox.value.toBigInt
-	val yAssets = primaryDexBox.tokens(2)._2.toBigInt
+1. **`allAssetsCounted`**: Every token in `boxToQuote.tokens.slice(1, ...)` must appear in the `(assetId, amount)` pairs from R7/R8
 
-	val dexFee = primaryDexBox.R4[Int].get.toBigInt
-	val quotePrice = (yAssets * totalBoxValue * dexFee) /
-	((xAssets + (xAssets * Slippage / SlippageDenom)) * DexFeeDenom +
-	(totalBoxValue * dexFee))
+2. **`correctNumberOfZeroes`**: If R5/R6 are configured for 3 possible tokens but the box only has 1, R7 must have exactly 2 zero entries
 
-	val isValidPrimaryDexBox = primaryDexBox.tokens(0)._1 == primaryDexNft
+3. **`assetsOrderedCorrectly`**: The token ID in each DEX box (`tokens(2)._1`) must match the corresponding entry in R8
 
-	val validQuote = quotePrice == fQuotePrice
+---
 
-	sigmaProp(
-		scriptRetained &&
-		quoteSettingsRetained &&
-		validQuote &&
-		validPenalty &&
-		validAggregateThreshold &&
-		allAssetsCounted &&
-		assetsOrderedCorrectly &&
-		dInsMatchesAssetsSize &&
-		matchingOrderedListSize &&
-		correctNumberOfZeroes &&
-		iBorrowLimit == fBorrowLimit &&
-		iMinimumValue == fMinimumValue &&
-		iBufferGap == fBufferGap &&
-		iMinimumLoanAmount == fMinimumLoanAmount &&
-        iShortLoanFee == fShortLoanFee &&
-        iShortLoanDuration == fShortLoanDuration &&
-		isValidPrimaryDexBox
-	)
-}}```
+## Preserved vs Calculated Fields
+
+| Field | Behavior |
+|-------|----------|
+| borrowLimit | Preserved (admin-set) |
+| quotePrice | **Calculated** per quote |
+| threshold | **Calculated** as weighted aggregate |
+| penalty | Static (hardcoded 30) |
+| minimumValue | Preserved (admin-set) |
+| bufferGap | Preserved (admin-set) |
+| minimumLoanAmount | Preserved (admin-set) |
+| shortLoanFee | Preserved (admin-set) |
+| shortLoanDuration | Preserved (admin-set) |
+| R5 (dexNfts) | Preserved |
+| R6 (thresholds) | Preserved |
+
+---
+
+## Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `Slippage` | 2 | 2% price buffer |
+| `SlippageDenom` | 100 | Slippage denominator |
+| `DexFeeDenom` | 1000 | Spectrum DEX fee denominator |
+| `MaximumNetworkFee` | 5,000,000 | 0.005 ERG deducted from collateral value |
+| `LargeMultiplier` | 1,000,000,000,000 | Precision for threshold calculation |
+
+---
+
+## Limitations
+
+- **Penalty is static**: Hardcoded to 30, cannot vary per-asset like threshold does
+- **Spectrum-specific**: DEX box structure assumes Spectrum format (`tokens(2)` = trading token, `R4[Int]` = fee)
+- **Sequential data inputs**: Secondary DEX boxes must be contiguous starting at `dexStartIndex + 1`
+
+---
+
+## Deployments
+
+| Network | Logic NFT | Contract Address |
+|---------|-----------|------------------|
+| Mainnet | TBD | TBD |
+| Testnet | TBD | TBD |
