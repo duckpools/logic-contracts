@@ -15,7 +15,7 @@ The Logic Contract fulfills several critical functions:
 1. **Price Discovery**: Calculates the market value of collateral assets (methodology is implementation-specific)
 2. **Threshold Reporting**: Reports the liquidation threshold applicable to the quoted collateral
 3. **Loan Parameter Reporting**: Provides loan settings (limits, fees, durations) to consuming contracts
-4. **Box Indexing**: Provides cryptographic linkage between quote outputs and the collateral/loan boxes they reference
+4. **Box Indexing**: Provides linkage between quote outputs and the collateral/loan boxes they reference
 
 ---
 
@@ -29,13 +29,13 @@ A collection of exactly 9 Long values that the Pool and Collateral contracts rea
 
 | Index | Field | Description | Referenced By | Valid Range |
 |-------|-------|-------------|---------------|-------------|
-| 0 | `borrowLimit` | Maximum total borrowed amount allowed from the pool | Pool | > 0 |
+| 0 | `borrowLimit` | Maximum total borrowed amount allowed from the pool | Pool | >= 0 |
 | 1 | `quotePrice` | Calculated value of collateral in pool currency | Pool, Collateral | ≥ 0 |
-| 2 | `threshold` | Liquidation threshold for this collateral | Pool, Collateral | 1-999 (denominator: 1000) |
+| 2 | `threshold` | Liquidation threshold for this collateral | Pool, Collateral | > 1000 (denominator: 1000) |
 | 3 | `penalty` | Liquidation penalty percentage | Collateral | 0-1000 (denominator: 1000) |
-| 4 | `minimumValue` | Minimum ERG value required in collateral box | Pool, Collateral | ≥ 1,000,000 |
+| 4 | `minimumValue` | Minimum ERG value required in collateral box | Pool, Collateral | ≥ 4,000,000 |
 | 5 | `bufferGap` | Block height gap for liquidation buffer | Pool, Collateral | > 0 |
-| 6 | `minimumLoanAmount` | Minimum loan size in pool currency | Pool, Collateral | > 0 |
+| 6 | `minimumLoanAmount` | Minimum loan size in pool currency | Pool, Collateral | >= 0 |
 | 7 | `shortLoanFee` | Fee percentage for early repayment | Pool, Collateral | 0-1000 (denominator: 1000) |
 | 8 | `shortLoanDuration` | Block duration where short loan fee applies | Pool, Collateral | ≥ 0 |
 
@@ -219,143 +219,11 @@ When creating a new Logic Contract:
 - [ ] R4 contains exactly 9 Long values
 - [ ] R4[0] (borrowLimit) reflects appropriate pool limits
 - [ ] R4[1] (quotePrice) accurately reflects collateral value in pool currency
-- [ ] R4[2] (threshold) is between 1-999
+- [ ] R4[2] (threshold) is above 1000
 - [ ] R4[3] (penalty) is between 0-1000
-- [ ] R4[4] (minimumValue) is ≥ 1,000,000
+- [ ] R4[4] (minimumValue) is ≥ 4,000,000
 - [ ] R4[5] (bufferGap) provides adequate liquidation warning
 - [ ] R4[6] (minimumLoanAmount) prevents dust loans
 - [ ] R4[7] (shortLoanFee) is between 0-1000
 - [ ] R4[8] (shortLoanDuration) is reasonable block count
 - [ ] R9[0] correctly indexes the quoted box (positive for OUTPUTS, negative for INPUTS)
-
----
-
----
-
-# Example Implementation: DEX-Based Logic Contract
-
-The following section describes the **specific implementation** provided in `generate_logic_script()`. This is one possible approach; other implementations could use different price sources (oracles, different DEX protocols, etc.).
-
-## Overview
-
-This example implementation calculates collateral value using on-chain Spectrum DEX liquidity pools. It:
-
-1. Reads ERG value directly from the collateral box
-2. Converts additional collateral tokens to ERG via DEX reserves
-3. Converts total ERG value to pool currency via primary DEX
-4. Calculates weighted aggregate threshold based on asset composition
-
-## Additional Registers (Implementation-Specific)
-
-Beyond the required R4 and R9, this implementation uses:
-
-### R5: DEX NFT Configuration (`Coll[Coll[Byte]]`)
-
-| Index | Purpose |
-|-------|---------|
-| 0 | Primary DEX NFT (ERG/PoolCurrency pair) |
-| 1+ | Secondary DEX NFTs (for collateral token → ERG conversion) |
-
-### R6: Asset Thresholds (`Coll[Long]`)
-
-Per-asset liquidation thresholds used to calculate weighted aggregate:
-
-| Index | Purpose |
-|-------|---------|
-| 0 | ERG threshold |
-| 1+ | Secondary token thresholds |
-
-### R7: Ordered Asset Amounts (`Coll[Long]`)
-
-Token amounts from the collateral box, ordered to match R5/R6:
-- `0` value indicates token not present in this collateral
-
-### R8: Ordered Asset IDs (`Coll[Coll[Byte]]`)
-
-Token IDs corresponding to R7 amounts (for validation).
-
-### R9: Extended Helper Indices (`Coll[Int]`)
-
-| Index | Purpose |
-|-------|---------|
-| 0 | Box index (REQUIRED) |
-| 1 | DEX start index in data inputs |
-
-## Price Calculation
-
-### Token → ERG Conversion
-
-```scala
-val collateralMarketValue = (dexReservesErg * inputAmount * dexFee) /
-    ((dexReservesToken._2 + (dexReservesToken._2 * Slippage / 100)) * DexFeeDenom +
-    (inputAmount * dexFee))
-```
-
-### Total ERG → Pool Currency
-
-```scala
-val quotePrice = (yAssets * totalBoxValue * dexFee) /
-    ((xAssets + (xAssets * Slippage / SlippageDenom)) * DexFeeDenom +
-    (totalBoxValue * dexFee))
-```
-
-Where:
-- `xAssets` = DEX ERG reserves
-- `yAssets` = DEX pool currency reserves
-- `Slippage` = 2% buffer
-- `totalBoxValue` = ERG in collateral + converted token values - network fee
-
-### Aggregate Threshold
-
-Weighted by each asset's proportion of total value:
-
-```scala
-val aggregateThreshold = (
-    (ergValue * primaryThreshold / totalValue) +
-    Σ(tokenValue * tokenThreshold / totalValue)
-)
-```
-
-## Constants (This Implementation)
-
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `Slippage` | 2 | 2% price buffer |
-| `SlippageDenom` | 100 | Slippage denominator |
-| `DexFeeDenom` | 1000 | DEX fee denominator |
-| `MaximumNetworkFee` | 5,000,000 | Deducted from collateral value |
-| `LargeMultiplier` | 1,000,000,000,000 | Precision for threshold math |
-
-## State Transition Rules
-
-This implementation enforces that settings remain constant between states:
-
-```scala
-val scriptRetained = outLogic.propositionBytes == SELF.propositionBytes
-val quoteSettingsRetained = fDexNfts == iDexNfts && fAssetThresholds == iAssetThresholds
-val iBorrowLimit == fBorrowLimit
-val iMinimumValue == fMinimumValue
-val iBufferGap == fBufferGap
-val iMinimumLoanAmount == fMinimumLoanAmount
-val iShortLoanFee == fShortLoanFee
-val iShortLoanDuration == fShortLoanDuration
-```
-
-Only `quotePrice`, `threshold` (aggregate), and `penalty` change between quotes.
-
-## Data Input Requirements
-
-| Index | Box | Required Tokens/Registers |
-|-------|-----|---------------------------|
-| `dexStartIndex` | Primary DEX | `tokens(0)` = DEX NFT, `tokens(2)` = pool currency, `R4[Int]` = fee |
-| `dexStartIndex + 1` to `n` | Secondary DEXs | `tokens(0)` = DEX NFT, `tokens(2)` = collateral token, `R4[Int]` = fee |
-
-## Validation Rules
-
-| Rule | Purpose |
-|------|---------|
-| `allAssetsCounted` | Every collateral token must appear in R7/R8 |
-| `assetsOrderedCorrectly` | R8 token IDs must match DEX pool tokens |
-| `dInsMatchesAssetsSize` | Number of DEX data inputs matches asset count |
-| `correctNumberOfZeroes` | Missing assets properly marked as 0 |
-| `isValidPrimaryDexBox` | Primary DEX NFT matches configuration |
