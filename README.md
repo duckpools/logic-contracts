@@ -39,6 +39,8 @@ A collection of exactly 9 Long values that the Pool and Collateral contracts rea
 | 7 | `shortLoanFee` | Fee percentage for early repayment | Pool, Collateral | 0-1000 (denominator: 1000) |
 | 8 | `shortLoanDuration` | Block duration where short loan fee applies | Pool, Collateral | ≥ 0 |
 
+Note that `borrowLimit` should always have a spending path to set to 0 to close the quote.
+
 ### R9: Box Index (`Coll[Int]`) — REQUIRED
 
 At minimum, index 0 must contain the box index value:
@@ -217,7 +219,7 @@ When creating a new Logic Contract:
 - [ ] Output box has unique identifying NFT as `tokens(0)`
 - [ ] NFT is registered in parameter box `R4[Coll[Coll[Byte]]]`
 - [ ] R4 contains exactly 9 Long values
-- [ ] R4[0] (borrowLimit) reflects appropriate pool limits
+- [ ] R4[0] (borrowLimit) reflects appropriate pool limits and has a path to set to 0
 - [ ] R4[1] (quotePrice) accurately reflects collateral value in pool currency
 - [ ] R4[2] (threshold) is above 1000
 - [ ] R4[3] (penalty) is between 0-1000
