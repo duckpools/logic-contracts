@@ -25,7 +25,7 @@ The Logic Contract fulfills several critical functions:
 
 ### R4: Quote Report (`Coll[Long]`) — REQUIRED
 
-A collection of exactly 9 Long values that the Pool and Collateral contracts read by index:
+A collection of exactly 10 Long values that the Pool and Collateral contracts read by index:
 
 | Index | Field | Description | Referenced By | Valid Range |
 |-------|-------|-------------|---------------|-------------|
@@ -38,6 +38,7 @@ A collection of exactly 9 Long values that the Pool and Collateral contracts rea
 | 6 | `minimumLoanAmount` | Minimum loan size in pool currency | Pool, Collateral | >= 0 |
 | 7 | `shortLoanFee` | Fee percentage for early repayment | Pool, Collateral | 0-1000 (denominator: 1000) |
 | 8 | `shortLoanDuration` | Block duration where short loan fee applies | Pool, Collateral | ≥ 0 |
+| 9 | `maxBorrowAmount` | Maximum loan size per transaction in pool currency | Pool | > 0 |
 
 Note that `borrowLimit` should always have a spending path to set to 0 to close the quote.
 
@@ -103,7 +104,6 @@ val isQuotedBoxValid = collateralIndex == fQuote.R9[Coll[Int]].get(0) * -1 - 1
 ### Token Identification
 
 Logic contracts are identified by their first token (NFT). Valid Logic NFTs are registered in the Pool's parameter box:
-
 ```scala
 val poolSettings = CONTEXT.dataInputs.filter{...}(0)
 val customLogicNFTs = poolSettings.R4[Coll[Coll[Byte]]].get
@@ -112,7 +112,6 @@ val customLogicNFTs = poolSettings.R4[Coll[Coll[Byte]]].get
 ### From Pool Contract (Borrow Operations)
 
 The pool locates the quote box by matching against registered Logic NFTs AND the collateral's specified quote NFT:
-
 ```scala
 val fQuote = OUTPUTS.filter{
     (b: Box) => b.tokens.size > 0 && customLogicNFTs.exists{
@@ -124,7 +123,6 @@ val fQuote = OUTPUTS.filter{
 ### From Collateral Contract (All Operations)
 
 The collateral contract stores its quote NFT in R7 and uses it to locate quote boxes:
-
 ```scala
 val currentQuoteNFT = SELF.R7[Coll[Byte]].get
 
@@ -152,6 +150,7 @@ During **borrow operations**, the pool reads:
 | `minimumLoanAmount` (6) | Validates `loanAmount >= minimumLoanAmount` |
 | `shortLoanFee` (7) | Recorded in collateral box R9 |
 | `shortLoanDuration` (8) | Recorded in collateral box R9 |
+| `maxBorrowAmount` (9) | Validates `loanAmount <= maxBorrowAmount` |
 
 ### Collateral Contract Usage
 
@@ -218,7 +217,7 @@ When creating a new Logic Contract:
 
 - [ ] Output box has unique identifying NFT as `tokens(0)`
 - [ ] NFT is registered in parameter box `R4[Coll[Coll[Byte]]]`
-- [ ] R4 contains exactly 9 Long values
+- [ ] R4 contains exactly 10 Long values
 - [ ] R4[0] (borrowLimit) reflects appropriate pool limits and has a path to set to 0
 - [ ] R4[1] (quotePrice) accurately reflects collateral value in pool currency
 - [ ] R4[2] (threshold) is above 1000
@@ -228,4 +227,5 @@ When creating a new Logic Contract:
 - [ ] R4[6] (minimumLoanAmount) prevents dust loans
 - [ ] R4[7] (shortLoanFee) is between 0-1000
 - [ ] R4[8] (shortLoanDuration) is reasonable block count
+- [ ] R4[9] (maxBorrowAmount) limits per-transaction exposure
 - [ ] R9[0] correctly indexes the quoted box (positive for OUTPUTS, negative for INPUTS)
